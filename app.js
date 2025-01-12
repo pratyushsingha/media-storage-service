@@ -1,9 +1,17 @@
 import express from "express";
 import fileRouter from "./routes/file.route.js";
 import mediaRouter from "./routes/media.route.js";
+import cors from "cors"
 
 
 const app = express();
+
+app.use(
+  cors({
+    origin: process.env.CORS_ORIGIN,
+    credentials: true,
+  })
+);
 
 app.use((req, res, next) => {
   console.log(req.method, req.url);

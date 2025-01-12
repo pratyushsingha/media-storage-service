@@ -5,50 +5,90 @@ import { IndexFacesCommand } from "@aws-sdk/client-rekognition";
 import { rekognitionClient } from "../utils/rekognition.js";
 import path from "path";
 import { saveFaceMetadata } from "../utils/helper.js";
+import sharp from "sharp";
+import Queue from "bull";
+import { PrismaClient } from "@prisma/client";
 
+const prisma = new PrismaClient();
 const router = Router();
 
+// Initialize Queue for background image processing
+const imageProcessingQueue = new Queue("image-processing", {
+  redis: { host: "localhost", port: 6379 },
+});
+
+// Directory to store uploaded files
 const storageDirectory = path.join(process.cwd(), "media_storage");
 
-router.route("/upload").post(upload.single("image"), async (req, res) => {
+// Compress image using sharp with progressive quality adjustment
+const compressImage = async (inputPath, outputPath) => {
+  let quality = 80;
+  let compressed = await sharp(inputPath)
+    .toFormat("jpeg")
+    .jpeg({ quality })
+    .toBuffer();
+
+  let size = compressed.length / 1024; // Size in KB
+  while (size > 500 && quality > 10) {
+    quality -= 10;
+    compressed = await sharp(inputPath)
+      .toFormat("jpeg")
+      .jpeg({ quality })
+      .toBuffer();
+    size = compressed.length / 1024;
+  }
+
+  fs.writeFileSync(outputPath, compressed);
+  return outputPath;
+};
+
+router.route("/upload").post(upload.array("images"), async (req, res) => {
   const albumPin = req.body.albumPin;
-  const imagePath = req.file.path;
+  const files = req.files;
+
+  if (!files || files.length === 0) {
+    return res.status(400).json({ error: "No images uploaded." });
+  }
 
   try {
-    const permanentPath = path.join(storageDirectory, req.file.filename);
+    const savedFileNames = [];
+
     if (!fs.existsSync(storageDirectory)) {
       fs.mkdirSync(storageDirectory, { recursive: true });
     }
-    fs.renameSync(imagePath, permanentPath);
 
-    const params = {
-      Image: {
-        Bytes: fs.readFileSync(permanentPath),
-      },
-      CollectionId: "global-album-collection",
-      ExternalImageId: albumPin,
-      MaxFaces: 5,
-      QualityFilter: "AUTO",
-      DetectionAttributes: ["ALL"],
-    };
-
-    const command = new IndexFacesCommand(params);
-    const response = await rekognitionClient.send(command);
-
-    console.log(response);
-
-    response.FaceRecords.forEach((faceRecord) => {
-      const faceId = faceRecord.Face.FaceId;
-      saveFaceMetadata(faceId, albumPin, permanentPath);
+    files.forEach((file) => {
+      savedFileNames.push(`compressed-${file.filename}`);
     });
 
-    res.json({ message: "Image uploaded and indexed", response });
+    for (const file of files) {
+      const temporaryPath = file.path;
+      const compressedFilePath = path.join(
+        storageDirectory,
+        `compressed-${file.filename}`
+      );
+
+      await compressImage(temporaryPath, compressedFilePath);
+
+      fs.unlinkSync(temporaryPath);
+
+      imageProcessingQueue.add({
+        albumPin,
+        file: compressedFilePath,
+        originalFileName: file.originalname,
+      });
+    }
+
+    res.json({
+      message: "Images uploaded and compressed successfully",
+      data: savedFileNames,
+      albumPin,
+    });
   } catch (error) {
-    console.error("Error processing the image:", error);
-    res.status(500).json({ error: "Error processing the image" });
+    console.error("Error processing the images:", error);
+    res.status(500).json({ error: "Error processing the images" });
   }
 });
-
 
 router.route("/:fileName").delete(async (req, res) => {
   const { fileName } = req.params;
@@ -80,4 +120,31 @@ router.route("/download/:fileName").get((req, res) => {
     }
   });
 });
+
+imageProcessingQueue.process(async (job) => {
+  const { albumPin, file, originalFileName } = job.data;
+
+  const params = {
+    Image: {
+      Bytes: fs.readFileSync(file),
+    },
+    CollectionId: "global-album-collection",
+    ExternalImageId: albumPin,
+    MaxFaces: 5,
+    QualityFilter: "AUTO",
+    DetectionAttributes: ["ALL"],
+  };
+
+  const command = new IndexFacesCommand(params);
+  const response = await rekognitionClient.send(command);
+
+  console.log(`Indexed image: ${originalFileName}`, response);
+
+  // Save metadata for each detected face in the image
+  response.FaceRecords.forEach((faceRecord) => {
+    const faceId = faceRecord.Face.FaceId;
+    saveFaceMetadata(faceId, albumPin, file);
+  });
+});
+
 export default router;
