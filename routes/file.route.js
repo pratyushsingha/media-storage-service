@@ -4,89 +4,55 @@ import { upload } from "../utils/multer.js";
 import { IndexFacesCommand } from "@aws-sdk/client-rekognition";
 import { rekognitionClient } from "../utils/rekognition.js";
 import path from "path";
-import { saveFaceMetadata } from "../utils/helper.js";
-import sharp from "sharp";
 import Queue from "bull";
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 const router = Router();
 
-// Initialize Queue for background image processing
 const imageProcessingQueue = new Queue("image-processing", {
   redis: { host: "localhost", port: 6379 },
 });
 
-// Directory to store uploaded files
 const storageDirectory = path.join(process.cwd(), "media_storage");
 
-// Compress image using sharp with progressive quality adjustment
-const compressImage = async (inputPath, outputPath) => {
-  let quality = 80;
-  let compressed = await sharp(inputPath)
-    .toFormat("jpeg")
-    .jpeg({ quality })
-    .toBuffer();
+router.route("/upload").post(upload.single("image"), async (req, res) => {
+  const albumPin = req.body.albumPin;
+  const file = req.file;
 
-  let size = compressed.length / 1024; // Size in KB
-  while (size > 500 && quality > 10) {
-    quality -= 10;
-    compressed = await sharp(inputPath)
-      .toFormat("jpeg")
-      .jpeg({ quality })
-      .toBuffer();
-    size = compressed.length / 1024;
+  if (!file) {
+    return res.status(400).json({ error: "No image uploaded." });
   }
 
-  fs.writeFileSync(outputPath, compressed);
-  return outputPath;
-};
-
-router.route("/upload").post(upload.array("images"), async (req, res) => {
-  const albumPin = req.body.albumPin;
-  const files = req.files;
-
-  if (!files || files.length === 0) {
-    return res.status(400).json({ error: "No images uploaded." });
+  if (!albumPin) {
+    return res.status(400).json({ error: "Album PIN is required." });
   }
 
   try {
-    const savedFileNames = [];
-
     if (!fs.existsSync(storageDirectory)) {
       fs.mkdirSync(storageDirectory, { recursive: true });
     }
 
-    files.forEach((file) => {
-      savedFileNames.push(`compressed-${file.filename}`);
+    const savedFilePath = path.join(storageDirectory, file.filename);
+
+    fs.renameSync(file.path, savedFilePath);
+
+    imageProcessingQueue.add({
+      albumPin,
+      file: savedFilePath,
+      originalFileName: file.originalname,
     });
 
-    for (const file of files) {
-      const temporaryPath = file.path;
-      const compressedFilePath = path.join(
-        storageDirectory,
-        `compressed-${file.filename}`
-      );
-
-      await compressImage(temporaryPath, compressedFilePath);
-
-      fs.unlinkSync(temporaryPath);
-
-      imageProcessingQueue.add({
-        albumPin,
-        file: compressedFilePath,
-        originalFileName: file.originalname,
-      });
-    }
+    const imageUrl = `http://localhost:8082/media/${file.filename}`; 
 
     res.json({
-      message: "Images uploaded and compressed successfully",
-      data: savedFileNames,
+      message: "Image uploaded and queued successfully",
+      imageUrl,
       albumPin,
     });
   } catch (error) {
-    console.error("Error processing the images:", error);
-    res.status(500).json({ error: "Error processing the images" });
+    console.error("Error processing the image:", error);
+    res.status(500).json({ error: "Error processing the image" });
   }
 });
 
@@ -141,10 +107,10 @@ imageProcessingQueue.process(async (job) => {
   console.log(`Indexed image: ${originalFileName}`, response);
 
   // Save metadata for each detected face in the image
-  response.FaceRecords.forEach((faceRecord) => {
-    const faceId = faceRecord.Face.FaceId;
-    saveFaceMetadata(faceId, albumPin, file);
-  });
+  // response.FaceRecords.forEach((faceRecord) => {
+  //   const faceId = faceRecord.Face.FaceId;
+  //   saveFaceMetadata(faceId, albumPin, file);
+  // });
 });
 
 export default router;
