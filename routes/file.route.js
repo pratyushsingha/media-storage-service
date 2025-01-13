@@ -43,7 +43,7 @@ router.route("/upload").post(upload.single("image"), async (req, res) => {
       originalFileName: file.originalname,
     });
 
-    const imageUrl = `http://localhost:8082/media/${file.filename}`; 
+    const imageUrl = `${process.env.BASE_URL}/media/${file.filename}`; 
 
     res.json({
       message: "Image uploaded and queued successfully",
