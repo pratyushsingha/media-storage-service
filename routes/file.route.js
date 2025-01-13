@@ -5,9 +5,7 @@ import { IndexFacesCommand } from "@aws-sdk/client-rekognition";
 import { rekognitionClient } from "../utils/rekognition.js";
 import path from "path";
 import Queue from "bull";
-import { PrismaClient } from "@prisma/client";
 
-const prisma = new PrismaClient();
 const router = Router();
 
 const imageProcessingQueue = new Queue("image-processing", {
@@ -37,11 +35,11 @@ router.route("/upload").post(upload.single("image"), async (req, res) => {
 
     fs.renameSync(file.path, savedFilePath);
 
-    imageProcessingQueue.add({
-      albumPin,
-      file: savedFilePath,
-      originalFileName: file.originalname,
-    });
+    // imageProcessingQueue.add({
+    //   albumPin,
+    //   file: savedFilePath,
+    //   originalFileName: file.originalname,
+    // });
 
     const imageUrl = `${process.env.BASE_URL}/media/${file.filename}`; 
 
@@ -90,21 +88,21 @@ router.route("/download/:fileName").get((req, res) => {
 imageProcessingQueue.process(async (job) => {
   const { albumPin, file, originalFileName } = job.data;
 
-  const params = {
-    Image: {
-      Bytes: fs.readFileSync(file),
-    },
-    CollectionId: "global-album-collection",
-    ExternalImageId: albumPin,
-    MaxFaces: 5,
-    QualityFilter: "AUTO",
-    DetectionAttributes: ["ALL"],
-  };
+  // const params = {
+  //   Image: {
+  //     Bytes: fs.readFileSync(file),
+  //   },
+  //   CollectionId: "global-album-collection",
+  //   ExternalImageId: albumPin,
+  //   MaxFaces: 5,
+  //   QualityFilter: "AUTO",
+  //   DetectionAttributes: ["ALL"],
+  // };
 
-  const command = new IndexFacesCommand(params);
-  const response = await rekognitionClient.send(command);
+  // const command = new IndexFacesCommand(params);
+  // const response = await rekognitionClient.send(command);
 
-  console.log(`Indexed image: ${originalFileName}`, response);
+  // console.log(`Indexed image: ${originalFileName}`, response);
 
   // Save metadata for each detected face in the image
   // response.FaceRecords.forEach((faceRecord) => {
