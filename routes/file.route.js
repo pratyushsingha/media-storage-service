@@ -1,189 +1,120 @@
 import { Router } from "express";
 import fs from "fs";
-import { upload } from "../utils/multer.js";
-import { IndexFacesCommand } from "@aws-sdk/client-rekognition";
-import { rekognitionClient } from "../utils/rekognition.js";
 import path from "path";
-import Queue from "bull";
+import multer from "multer";
 import sharp from "sharp";
+import { upload } from "../utils/multer.js";
 
 const router = Router();
 
-const imageProcessingQueue = new Queue("image-processing", {
-  redis: { host: "localhost", port: 6379 },
-});
+const mediaStoragePath = path.join(process.cwd(), "media");
 
-const storageDirectory = path.join(process.cwd(), "media_storage");
+if (!fs.existsSync(mediaStoragePath)) {
+  fs.mkdirSync(mediaStoragePath);
+}
 
-// Target file size in bytes (450KB as middle point between 400-500KB)
-const TARGET_FILE_SIZE = 450 * 1024;
-const MIN_FILE_SIZE = 400 * 1024;
-const MAX_FILE_SIZE = 500 * 1024;
+const MAX_FILE_SIZE = 600 * 1024; // 500 KB
+const MIN_QUALITY = 10; 
 
-// Initial compression options
-const getCompressionOptions = (quality = 80) => ({
-  jpeg: {
-    quality,
-    chromaSubsampling: "4:4:4",
-  },
-  png: {
-    quality,
-    palette: true,
-    compressionLevel: 9,
-  },
-  webp: {
-    quality,
-    effort: 6,
-  },
-});
+// Compress image function
+async function compressImage(inputPath, outputPath) {
+  let quality = 80;
 
-router.route("/upload").post(upload.single("image"), async (req, res) => {
-  const albumPin = req.body.albumPin;
-  const file = req.file;
+  while (quality >= MIN_QUALITY) {
+    try {
+      await sharp(inputPath).jpeg({ quality }).toFile(outputPath);
 
-  if (!file) {
-    return res.status(400).json({ error: "No image uploaded." });
+      const fileSize = fs.statSync(outputPath).size;
+
+      if (fileSize <= MAX_FILE_SIZE) {
+        console.log(
+          `Image compressed to ${fileSize} bytes with quality ${quality}`
+        );
+        return outputPath; 
+      }
+
+      quality -= 10;
+    } catch (error) {
+      console.error("Error during compression:", error);
+      throw new Error("Image compression failed");
+    }
   }
+
+  throw new Error(
+    "Unable to compress image under 500 KB with minimum quality."
+  );
+}
+
+router.post("/upload", upload.array("files", 10), async (req, res) => {
+  const albumPin = req.body.albumPin;
 
   if (!albumPin) {
-    return res.status(400).json({ error: "Album PIN is required." });
+    throw new Error("Album pin is required");
   }
-
   try {
-    if (!fs.existsSync(storageDirectory)) {
-      fs.mkdirSync(storageDirectory, { recursive: true });
+    const fileLinks = [];
+
+    for (const file of req.files) {
+      const outputFilePath = path.join(
+        mediaStoragePath,
+        `${albumPin}_${Date.now()}.jpg`
+      );
+
+      try {
+        await compressImage(file.path, outputFilePath);
+
+        const fileUrl = `${req.protocol}://${req.get(
+          "host"
+        )}/media/${path.basename(outputFilePath)}`;
+        fileLinks.push(fileUrl);
+
+        fs.unlinkSync(file.path);
+      } catch (err) {
+        console.error("Error compressing image:", err);
+        if (fs.existsSync(outputFilePath)) {
+          fs.unlinkSync(outputFilePath);
+        }
+        fs.unlinkSync(file.path);
+        return res.status(500).json({ error: "Failed to compress image" });
+      }
     }
 
-    const tempFilePath = file.path;
-    const fileExtension = path.extname(file.originalname).toLowerCase();
-    const compressedFileName = `${path.basename(
-      file.filename,
-      fileExtension
-    )}_compressed${fileExtension}`;
-    const savedFilePath = path.join(storageDirectory, compressedFileName);
-
-    await imageProcessingQueue.add("compression", {
-      albumPin,
-      tempFilePath,
-      savedFilePath,
-      originalFileName: file.originalname,
-      fileExtension,
-    });
-
-    const imageUrl = `${process.env.BASE_URL}/media/${compressedFileName}`;
-
-    res.json({
-      message: "Image uploaded and queued for compression",
-      imageUrl,
-      albumPin,
-    });
+    return res
+      .status(200)
+      .json({ message: "Files uploaded successfully", fileLinks });
   } catch (error) {
-    console.error("Error processing the image:", error);
-    res.status(500).json({ error: "Error processing the image" });
+    console.error("Error uploading files:", error);
+    return res.status(500).json({ error: "Failed to upload files" });
   }
 });
 
-// Existing routes remain the same...
-router.route("/:fileName").delete(async (req, res) => {
+// Delete image API
+router.delete("/:fileName", async (req, res) => {
   const { fileName } = req.params;
-  const imagePath = path.join(storageDirectory, fileName);
+  const imagePath = path.join(mediaStoragePath, fileName);
 
   try {
     if (fs.existsSync(imagePath)) {
       fs.unlinkSync(imagePath);
-      await prisma.faceMetadata.deleteMany({
-        where: { imagePath: fileName },
-      });
       res.status(200).json({ message: "Image deleted successfully." });
     } else {
-      res.status(404).json({ error: "Image not found" });
+      res.status(404).json({ error: "Image not found." });
     }
   } catch (error) {
-    console.error("Error deleting the image:", error);
-    res.status(500).json({ error: "Error deleting the image" });
+    console.error("Error deleting image:", error);
+    res.status(500).json({ error: "Error deleting image." });
   }
 });
 
-router.route("/download/:fileName").get((req, res) => {
+// Download image API
+router.get("/download/:fileName", (req, res) => {
   const { fileName } = req.params;
-  const imagePath = path.join(storageDirectory, fileName);
+  const imagePath = path.join(mediaStoragePath, fileName);
 
-  res.download(imagePath, (err) => {
-    if (err) {
-      res.status(404).send("Image not found");
-    }
-  });
-});
-
-async function compressWithTargetSize(sharpInstance, format, outputPath) {
-  let minQuality = 10;
-  let maxQuality = 100;
-  let currentQuality = 80;
-  let attempts = 0;
-  const maxAttempts = 5;
-
-  while (attempts < maxAttempts) {
-    const options = getCompressionOptions(currentQuality)[format];
-
-    await sharpInstance[format](options).toFile(outputPath);
-
-    const stats = fs.statSync(outputPath);
-    const fileSize = stats.size;
-
-    if (fileSize >= MIN_FILE_SIZE && fileSize <= MAX_FILE_SIZE) {
-      break;
-    } else if (fileSize > MAX_FILE_SIZE) {
-      maxQuality = currentQuality;
-      currentQuality = Math.floor((minQuality + currentQuality) / 2);
-    } else {
-      minQuality = currentQuality;
-      currentQuality = Math.floor((currentQuality + maxQuality) / 2);
-    }
-
-    attempts++;
-
-    if (attempts < maxAttempts) {
-      fs.unlinkSync(outputPath);
-    }
-  }
-}
-
-imageProcessingQueue.process("compression", async (job) => {
-  const { tempFilePath, savedFilePath, fileExtension } = job.data;
-
-  try {
-    const sharpImage = sharp(tempFilePath);
-
-    let outputFormat = "jpeg";
-    switch (fileExtension.toLowerCase()) {
-      case ".jpg":
-      case ".jpeg":
-        outputFormat = "jpeg";
-        break;
-      case ".png":
-        outputFormat = "png";
-        break;
-      case ".webp":
-        outputFormat = "webp";
-        break;
-    }
-
-    await compressWithTargetSize(sharpImage, outputFormat, savedFilePath);
-
-    fs.unlinkSync(tempFilePath);
-
-    const stats = fs.statSync(savedFilePath);
-    const finalSize = stats.size / 1024;
-
-    return {
-      success: true,
-      path: savedFilePath,
-      size: Math.round(finalSize) + "KB",
-    };
-  } catch (error) {
-    console.error("Error compressing image:", error);
-    if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
-    throw error;
+  if (fs.existsSync(imagePath)) {
+    res.download(imagePath);
+  } else {
+    res.status(404).send("Image not found.");
   }
 });
 

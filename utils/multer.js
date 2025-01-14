@@ -8,7 +8,7 @@ export const __dirname = path.dirname(__filename);
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const uploadPath = path.resolve(__dirname, "..", "media_storage"); 
+    const uploadPath = path.resolve(__dirname, "..", "media"); 
     if (!fs.existsSync(uploadPath)) {
       fs.mkdirSync(uploadPath, { recursive: true });
     }

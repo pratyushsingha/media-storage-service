@@ -6,7 +6,7 @@ const router = Router();
 
 router.route("/:fileName").get((req, res) => {
   const { fileName } = req.params;
-  const imagePath = path.join(__dirname, "..", "media_storage", fileName);
+  const imagePath = path.join(__dirname, "..", "media", fileName);
 
   res.sendFile(imagePath, (err) => {
     if (err) {
