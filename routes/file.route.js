@@ -18,7 +18,7 @@ const MIN_QUALITY = 10;
 
 // Compress image function
 async function compressImage(inputPath, outputPath) {
-  let quality = 80;
+  let quality = 20;
 
   while (quality >= MIN_QUALITY) {
     try {
@@ -45,7 +45,7 @@ async function compressImage(inputPath, outputPath) {
   );
 }
 
-router.post("/upload", upload.array("files", 10), async (req, res) => {
+router.post("/upload", upload.array("files", 2), async (req, res) => {
   const albumPin = req.body.albumPin;
 
   if (!albumPin) {
