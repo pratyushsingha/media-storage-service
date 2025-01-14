@@ -1,7 +1,6 @@
 import { Router } from "express";
 import fs from "fs";
 import path from "path";
-import multer from "multer";
 import sharp from "sharp";
 import { upload } from "../utils/multer.js";
 
@@ -13,12 +12,13 @@ if (!fs.existsSync(mediaStoragePath)) {
   fs.mkdirSync(mediaStoragePath);
 }
 
-const MAX_FILE_SIZE = 600 * 1024; // 500 KB
-const MIN_QUALITY = 10; 
+const MAX_FILE_SIZE = 1024 * 1024;
+const MIN_QUALITY = 40;
+const MAX_RETRIES = 3;
 
-// Compress image function
-async function compressImage(inputPath, outputPath) {
-  let quality = 20;
+async function compressImage(inputPath, outputPath, attempt = 1) {
+  let quality = 80;
+  const qualityStep = 10;
 
   while (quality >= MIN_QUALITY) {
     try {
@@ -28,20 +28,27 @@ async function compressImage(inputPath, outputPath) {
 
       if (fileSize <= MAX_FILE_SIZE) {
         console.log(
-          `Image compressed to ${fileSize} bytes with quality ${quality}`
+          `Image compressed to ${fileSize} bytes with quality ${quality} (attempt ${attempt})`
         );
-        return outputPath; 
+        return outputPath;
       }
 
-      quality -= 10;
+      quality -= qualityStep;
     } catch (error) {
-      console.error("Error during compression:", error);
-      throw new Error("Image compression failed");
+      console.error(`Compression attempt ${attempt} failed:`, error);
+
+      if (attempt < MAX_RETRIES) {
+        console.log(`Retrying compression (attempt ${attempt + 1})`);
+        return compressImage(inputPath, outputPath, attempt + 1);
+      }
+
+      throw new Error(`Image compression failed after ${MAX_RETRIES} attempts`);
     }
   }
 
+  // If we can't compress to 1MB even with minimum quality, throw error
   throw new Error(
-    "Unable to compress image under 500 KB with minimum quality."
+    `Unable to compress image under 1 MB with minimum quality of ${MIN_QUALITY}%`
   );
 }
 
@@ -49,10 +56,12 @@ router.post("/upload", upload.array("files", 2), async (req, res) => {
   const albumPin = req.body.albumPin;
 
   if (!albumPin) {
-    throw new Error("Album pin is required");
+    return res.status(400).json({ error: "Album pin is required" });
   }
+
   try {
     const fileLinks = [];
+    const errors = [];
 
     for (const file of req.files) {
       const outputFilePath = path.join(
@@ -70,18 +79,41 @@ router.post("/upload", upload.array("files", 2), async (req, res) => {
 
         fs.unlinkSync(file.path);
       } catch (err) {
-        console.error("Error compressing image:", err);
+        console.error("Error processing file:", err);
+        errors.push({
+          fileName: file.originalname,
+          error: err.message,
+        });
+
+        // Cleanup files
         if (fs.existsSync(outputFilePath)) {
           fs.unlinkSync(outputFilePath);
         }
         fs.unlinkSync(file.path);
-        return res.status(500).json({ error: "Failed to compress image" });
       }
     }
 
-    return res
-      .status(200)
-      .json({ message: "Files uploaded successfully", fileLinks });
+    if (fileLinks.length > 0 && errors.length > 0) {
+      return res.status(207).json({
+        message: "Some files were processed successfully",
+        fileLinks,
+        errors,
+      });
+    }
+
+    // If all files failed
+    if (errors.length > 0 && fileLinks.length === 0) {
+      return res.status(500).json({
+        error: "Failed to process all files",
+        details: errors,
+      });
+    }
+
+    // All files processed successfully
+    return res.status(200).json({
+      message: "Files uploaded successfully",
+      fileLinks,
+    });
   } catch (error) {
     console.error("Error uploading files:", error);
     return res.status(500).json({ error: "Failed to upload files" });
