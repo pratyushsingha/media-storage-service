@@ -5,6 +5,7 @@ import { IndexFacesCommand } from "@aws-sdk/client-rekognition";
 import { rekognitionClient } from "../utils/rekognition.js";
 import path from "path";
 import Queue from "bull";
+import sharp from "sharp";
 
 const router = Router();
 
@@ -13,6 +14,28 @@ const imageProcessingQueue = new Queue("image-processing", {
 });
 
 const storageDirectory = path.join(process.cwd(), "media_storage");
+
+// Target file size in bytes (450KB as middle point between 400-500KB)
+const TARGET_FILE_SIZE = 450 * 1024;
+const MIN_FILE_SIZE = 400 * 1024;
+const MAX_FILE_SIZE = 500 * 1024;
+
+// Initial compression options
+const getCompressionOptions = (quality = 80) => ({
+  jpeg: {
+    quality,
+    chromaSubsampling: "4:4:4",
+  },
+  png: {
+    quality,
+    palette: true,
+    compressionLevel: 9,
+  },
+  webp: {
+    quality,
+    effort: 6,
+  },
+});
 
 router.route("/upload").post(upload.single("image"), async (req, res) => {
   const albumPin = req.body.albumPin;
@@ -31,20 +54,26 @@ router.route("/upload").post(upload.single("image"), async (req, res) => {
       fs.mkdirSync(storageDirectory, { recursive: true });
     }
 
-    const savedFilePath = path.join(storageDirectory, file.filename);
+    const tempFilePath = file.path;
+    const fileExtension = path.extname(file.originalname).toLowerCase();
+    const compressedFileName = `${path.basename(
+      file.filename,
+      fileExtension
+    )}_compressed${fileExtension}`;
+    const savedFilePath = path.join(storageDirectory, compressedFileName);
 
-    fs.renameSync(file.path, savedFilePath);
+    await imageProcessingQueue.add("compression", {
+      albumPin,
+      tempFilePath,
+      savedFilePath,
+      originalFileName: file.originalname,
+      fileExtension,
+    });
 
-    // imageProcessingQueue.add({
-    //   albumPin,
-    //   file: savedFilePath,
-    //   originalFileName: file.originalname,
-    // });
-
-    const imageUrl = `${process.env.BASE_URL}/media/${file.filename}`; 
+    const imageUrl = `${process.env.BASE_URL}/media/${compressedFileName}`;
 
     res.json({
-      message: "Image uploaded and queued successfully",
+      message: "Image uploaded and queued for compression",
       imageUrl,
       albumPin,
     });
@@ -54,6 +83,7 @@ router.route("/upload").post(upload.single("image"), async (req, res) => {
   }
 });
 
+// Existing routes remain the same...
 router.route("/:fileName").delete(async (req, res) => {
   const { fileName } = req.params;
   const imagePath = path.join(storageDirectory, fileName);
@@ -85,30 +115,76 @@ router.route("/download/:fileName").get((req, res) => {
   });
 });
 
-imageProcessingQueue.process(async (job) => {
-  const { albumPin, file, originalFileName } = job.data;
+async function compressWithTargetSize(sharpInstance, format, outputPath) {
+  let minQuality = 10;
+  let maxQuality = 100;
+  let currentQuality = 80;
+  let attempts = 0;
+  const maxAttempts = 5;
 
-  // const params = {
-  //   Image: {
-  //     Bytes: fs.readFileSync(file),
-  //   },
-  //   CollectionId: "global-album-collection",
-  //   ExternalImageId: albumPin,
-  //   MaxFaces: 5,
-  //   QualityFilter: "AUTO",
-  //   DetectionAttributes: ["ALL"],
-  // };
+  while (attempts < maxAttempts) {
+    const options = getCompressionOptions(currentQuality)[format];
 
-  // const command = new IndexFacesCommand(params);
-  // const response = await rekognitionClient.send(command);
+    await sharpInstance[format](options).toFile(outputPath);
 
-  // console.log(`Indexed image: ${originalFileName}`, response);
+    const stats = fs.statSync(outputPath);
+    const fileSize = stats.size;
 
-  // Save metadata for each detected face in the image
-  // response.FaceRecords.forEach((faceRecord) => {
-  //   const faceId = faceRecord.Face.FaceId;
-  //   saveFaceMetadata(faceId, albumPin, file);
-  // });
+    if (fileSize >= MIN_FILE_SIZE && fileSize <= MAX_FILE_SIZE) {
+      break;
+    } else if (fileSize > MAX_FILE_SIZE) {
+      maxQuality = currentQuality;
+      currentQuality = Math.floor((minQuality + currentQuality) / 2);
+    } else {
+      minQuality = currentQuality;
+      currentQuality = Math.floor((currentQuality + maxQuality) / 2);
+    }
+
+    attempts++;
+
+    if (attempts < maxAttempts) {
+      fs.unlinkSync(outputPath);
+    }
+  }
+}
+
+imageProcessingQueue.process("compression", async (job) => {
+  const { tempFilePath, savedFilePath, fileExtension } = job.data;
+
+  try {
+    const sharpImage = sharp(tempFilePath);
+
+    let outputFormat = "jpeg";
+    switch (fileExtension.toLowerCase()) {
+      case ".jpg":
+      case ".jpeg":
+        outputFormat = "jpeg";
+        break;
+      case ".png":
+        outputFormat = "png";
+        break;
+      case ".webp":
+        outputFormat = "webp";
+        break;
+    }
+
+    await compressWithTargetSize(sharpImage, outputFormat, savedFilePath);
+
+    fs.unlinkSync(tempFilePath);
+
+    const stats = fs.statSync(savedFilePath);
+    const finalSize = stats.size / 1024;
+
+    return {
+      success: true,
+      path: savedFilePath,
+      size: Math.round(finalSize) + "KB",
+    };
+  } catch (error) {
+    console.error("Error compressing image:", error);
+    if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+    throw error;
+  }
 });
 
 export default router;
