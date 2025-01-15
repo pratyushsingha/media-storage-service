@@ -3,37 +3,42 @@ import fs from "fs";
 import path from "path";
 import sharp from "sharp";
 import { upload } from "../utils/multer.js";
+import Queue from 'bull';
 
 const router = Router();
-
 const mediaStoragePath = path.join(process.cwd(), "media");
+
+// Create processing queue
+const imageProcessingQueue = new Queue('image-processing', {
+  redis: {
+    host: 'localhost',
+    port: 6379
+  }
+});
 
 if (!fs.existsSync(mediaStoragePath)) {
   fs.mkdirSync(mediaStoragePath);
 }
 
-const MAX_FILE_SIZE = 600 * 1024; // 600 KB upper limit
-const MIN_FILE_SIZE = 500 * 1024; // 500 KB lower limit
-const MIN_QUALITY = 10; // Minimum quality for compression
+const MAX_FILE_SIZE = 600 * 1024;
+const MIN_FILE_SIZE = 500 * 1024;
+const MIN_QUALITY = 10;
 
 async function compressImage(inputPath, outputPath) {
   let quality = 80;
-  const qualityStep = 5; // Reduce quality in smaller steps for better precision
+  const qualityStep = 5;
   let lastSuccessfulFileSize = null;
   let bestOutputPath = null;
 
   while (quality >= MIN_QUALITY) {
-    // Generate compressed image
     await sharp(inputPath).jpeg({ quality }).toFile(outputPath);
-
     const fileSize = fs.statSync(outputPath).size;
 
     if (fileSize >= MIN_FILE_SIZE && fileSize <= MAX_FILE_SIZE) {
       console.log(`Image compressed to ${fileSize} bytes with quality ${quality}`);
-      return outputPath; // Compression successful within range
+      return outputPath;
     }
 
-    // Track the closest file size and its quality if compression isn't perfect
     if (!lastSuccessfulFileSize || fileSize < lastSuccessfulFileSize) {
       lastSuccessfulFileSize = fileSize;
       bestOutputPath = outputPath;
@@ -42,7 +47,6 @@ async function compressImage(inputPath, outputPath) {
     quality -= qualityStep;
   }
 
-  // If unable to meet size range, return the best achievable compression
   if (bestOutputPath) {
     console.log(
       `Unable to compress image within 500-600 KB. Best size: ${lastSuccessfulFileSize} bytes.`
@@ -53,7 +57,38 @@ async function compressImage(inputPath, outputPath) {
   throw new Error(`Failed to compress image.`);
 }
 
-router.post("/upload", upload.array("files", 2), async (req, res) => {
+// Queue processor
+imageProcessingQueue.process(async (job) => {
+  const { inputPath, outputPath } = job.data;
+  
+  try {
+    const compressedPath = await compressImage(inputPath, outputPath);
+    // Cleanup original file after successful compression
+    fs.unlinkSync(inputPath);
+    return { success: true, path: compressedPath };
+  } catch (error) {
+    // Cleanup files in case of error
+    if (fs.existsSync(outputPath)) {
+      fs.unlinkSync(outputPath);
+    }
+    if (fs.existsSync(inputPath)) {
+      fs.unlinkSync(inputPath);
+    }
+    throw error;
+  }
+});
+
+// Handle completed jobs
+imageProcessingQueue.on('completed', (job, result) => {
+  console.log(`Job ${job.id} completed. File processed: ${result.path}`);
+});
+
+// Handle failed jobs
+imageProcessingQueue.on('failed', (job, error) => {
+  console.error(`Job ${job.id} failed:`, error);
+});
+
+router.post("/upload", upload.array("files", 8), async (req, res) => {
   const albumPin = req.body.albumPin;
 
   if (!albumPin) {
@@ -61,63 +96,41 @@ router.post("/upload", upload.array("files", 2), async (req, res) => {
   }
 
   try {
-    const fileLinks = [];
-    const errors = [];
+    const predictions = req.files.map(file => {
+      const timestamp = Date.now();
+      const outputFileName = `${albumPin}_${timestamp}.jpg`;
+      const outputFilePath = path.join(mediaStoragePath, outputFileName);
+      
+      // Generate predicted URL
+      const predictedUrl = `${req.protocol}://${req.get("host")}/media/${outputFileName}`;
 
-    for (const file of req.files) {
-      const outputFilePath = path.join(
-        mediaStoragePath,
-        `${albumPin}_${Date.now()}.jpg`
-      );
-
-      try {
-        const compressedPath = await compressImage(file.path, outputFilePath);
-
-        const fileUrl = `${req.protocol}://${req.get(
-          "host"
-        )}/media/${path.basename(compressedPath)}`;
-        fileLinks.push(fileUrl);
-
-        fs.unlinkSync(file.path);
-      } catch (err) {
-        console.error("Error processing file:", err);
-        errors.push({
-          fileName: file.originalname,
-          error: err.message,
-        });
-
-        // Cleanup files
-        if (fs.existsSync(outputFilePath)) {
-          fs.unlinkSync(outputFilePath);
-        }
-        fs.unlinkSync(file.path);
-      }
-    }
-
-    if (fileLinks.length > 0 && errors.length > 0) {
-      return res.status(207).json({
-        message: "Some files were processed successfully",
-        fileLinks,
-        errors,
+      // Add to processing queue
+      imageProcessingQueue.add({
+        inputPath: file.path,
+        outputPath: outputFilePath
+      }, {
+        attempts: 3,
+        removeOnComplete: true
       });
-    }
 
-    // If all files failed
-    if (errors.length > 0 && fileLinks.length === 0) {
-      return res.status(500).json({
-        error: "Failed to process all files",
-        details: errors,
-      });
-    }
-
-    // All files processed successfully
-    return res.status(200).json({
-      message: "Files uploaded successfully",
-      fileLinks,
+      return {
+        originalName: file.originalname,
+        predictedUrl
+      };
     });
+
+    // Return predicted URLs immediately
+    return res.status(202).json({
+      message: "Files accepted for processing",
+      predictedUrls: predictions.map(p => ({
+        fileName: p.originalName,
+        url: p.predictedUrl
+      }))
+    });
+
   } catch (error) {
-    console.error("Error uploading files:", error);
-    return res.status(500).json({ error: "Failed to upload files" });
+    console.error("Error handling upload:", error);
+    return res.status(500).json({ error: "Failed to process upload request" });
   }
 });
 
