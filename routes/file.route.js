@@ -15,45 +15,31 @@ if (!fs.existsSync(mediaStoragePath)) {
 const MAX_FILE_SIZE = 600 * 1024; // 600 KB upper limit
 const MIN_FILE_SIZE = 500 * 1024; // 500 KB lower limit
 const MIN_QUALITY = 10; // Minimum quality for compression
-const MAX_RETRIES = 3;
 
-async function compressImage(inputPath, outputPath, attempt = 1) {
+async function compressImage(inputPath, outputPath) {
   let quality = 80;
   const qualityStep = 5; // Reduce quality in smaller steps for better precision
   let lastSuccessfulFileSize = null;
   let bestOutputPath = null;
 
   while (quality >= MIN_QUALITY) {
-    try {
-      // Generate compressed image
-      await sharp(inputPath).jpeg({ quality }).toFile(outputPath);
+    // Generate compressed image
+    await sharp(inputPath).jpeg({ quality }).toFile(outputPath);
 
-      const fileSize = fs.statSync(outputPath).size;
+    const fileSize = fs.statSync(outputPath).size;
 
-      if (fileSize >= MIN_FILE_SIZE && fileSize <= MAX_FILE_SIZE) {
-        console.log(
-          `Image compressed to ${fileSize} bytes with quality ${quality} (attempt ${attempt})`
-        );
-        return outputPath; // Compression successful within range
-      }
-
-      // Track the closest file size and its quality if compression isn't perfect
-      if (!lastSuccessfulFileSize || fileSize < lastSuccessfulFileSize) {
-        lastSuccessfulFileSize = fileSize;
-        bestOutputPath = outputPath;
-      }
-
-      quality -= qualityStep;
-    } catch (error) {
-      console.error(`Compression attempt ${attempt} failed:`, error);
-
-      if (attempt < MAX_RETRIES) {
-        console.log(`Retrying compression (attempt ${attempt + 1})`);
-        return compressImage(inputPath, outputPath, attempt + 1);
-      }
-
-      throw new Error(`Image compression failed after ${MAX_RETRIES} attempts`);
+    if (fileSize >= MIN_FILE_SIZE && fileSize <= MAX_FILE_SIZE) {
+      console.log(`Image compressed to ${fileSize} bytes with quality ${quality}`);
+      return outputPath; // Compression successful within range
     }
+
+    // Track the closest file size and its quality if compression isn't perfect
+    if (!lastSuccessfulFileSize || fileSize < lastSuccessfulFileSize) {
+      lastSuccessfulFileSize = fileSize;
+      bestOutputPath = outputPath;
+    }
+
+    quality -= qualityStep;
   }
 
   // If unable to meet size range, return the best achievable compression
@@ -64,8 +50,7 @@ async function compressImage(inputPath, outputPath, attempt = 1) {
     return bestOutputPath;
   }
 
-  // Fallback for cases where no compression was possible
-  throw new Error(`Failed to compress image after all attempts.`);
+  throw new Error(`Failed to compress image.`);
 }
 
 router.post("/upload", upload.array("files", 2), async (req, res) => {
@@ -135,7 +120,6 @@ router.post("/upload", upload.array("files", 2), async (req, res) => {
     return res.status(500).json({ error: "Failed to upload files" });
   }
 });
-
 
 // Delete image API
 router.delete("/:fileName", async (req, res) => {
