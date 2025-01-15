@@ -12,16 +12,18 @@ if (!fs.existsSync(mediaStoragePath)) {
   fs.mkdirSync(mediaStoragePath);
 }
 
-const MAX_FILE_SIZE = 2048 * 1024;
-const MIN_QUALITY = 20;
+const MAX_FILE_SIZE = 500 * 1024;
+const MIN_QUALITY = 10;
 const MAX_RETRIES = 3;
 
 async function compressImage(inputPath, outputPath, attempt = 1) {
   let quality = 80;
-  const qualityStep = 10;
+  const qualityStep = 5;
+  let lastSuccessfulFileSize = null;
 
   while (quality >= MIN_QUALITY) {
     try {
+      // Compress the image
       await sharp(inputPath).jpeg({ quality }).toFile(outputPath);
 
       const fileSize = fs.statSync(outputPath).size;
@@ -33,6 +35,7 @@ async function compressImage(inputPath, outputPath, attempt = 1) {
         return outputPath;
       }
 
+      lastSuccessfulFileSize = fileSize;
       quality -= qualityStep;
     } catch (error) {
       console.error(`Compression attempt ${attempt} failed:`, error);
@@ -46,10 +49,10 @@ async function compressImage(inputPath, outputPath, attempt = 1) {
     }
   }
 
-  // If we can't compress to 1MB even with minimum quality, throw error
-  throw new Error(
-    `Unable to compress image under 1 MB with minimum quality of ${MIN_QUALITY}%`
+  console.log(
+    `Unable to compress image under ${MAX_FILE_SIZE} bytes. Best size: ${lastSuccessfulFileSize} bytes at minimum quality.`
   );
+  return outputPath;
 }
 
 router.post("/upload", upload.array("files", 2), async (req, res) => {
