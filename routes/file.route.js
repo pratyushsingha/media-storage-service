@@ -12,8 +12,8 @@ if (!fs.existsSync(mediaStoragePath)) {
   fs.mkdirSync(mediaStoragePath);
 }
 
-const MAX_FILE_SIZE = 1024 * 1024;
-const MIN_QUALITY = 40;
+const MAX_FILE_SIZE = 2048 * 1024;
+const MIN_QUALITY = 20;
 const MAX_RETRIES = 3;
 
 async function compressImage(inputPath, outputPath, attempt = 1) {
@@ -53,7 +53,7 @@ async function compressImage(inputPath, outputPath, attempt = 1) {
 }
 
 router.post("/upload", upload.array("files", 2), async (req, res) => {
-  const albumPin = req.body.albumPin;
+  const albumPin = req.headers["x-album-pin"];
 
   if (!albumPin) {
     return res.status(400).json({ error: "Album pin is required" });
