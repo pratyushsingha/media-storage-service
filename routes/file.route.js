@@ -86,7 +86,7 @@ imageProcessingQueue.on('failed', (job, error) => {
   console.error(`Job ${job.id} failed:`, error);
 });
 
-router.post("/upload", upload.array("files", 8), async (req, res) => {
+router.post("/upload", upload.array("files", 2), async (req, res) => {
   const albumPin = req.body.albumPin;
 
   if (!albumPin) {
