@@ -78,12 +78,10 @@ imageProcessingQueue.process(async (job) => {
   }
 });
 
-// Handle completed jobs
 imageProcessingQueue.on('completed', (job, result) => {
   console.log(`Job ${job.id} completed. File processed: ${result.path}`);
 });
 
-// Handle failed jobs
 imageProcessingQueue.on('failed', (job, error) => {
   console.error(`Job ${job.id} failed:`, error);
 });
@@ -96,13 +94,17 @@ router.post("/upload", upload.array("files", 8), async (req, res) => {
   }
 
   try {
-    const predictions = req.files.map(file => {
+    const fileLinks = [];
+    const errors = [];
+
+    for (const file of req.files) {
       const timestamp = Date.now();
       const outputFileName = `${albumPin}_${timestamp}.jpg`;
       const outputFilePath = path.join(mediaStoragePath, outputFileName);
       
-      // Generate predicted URL
-      const predictedUrl = `${req.protocol}://${req.get("host")}/media/${outputFileName}`;
+      // Generate predicted URL and add to fileLinks
+      const fileUrl = `${req.protocol}://${req.get("host")}/media/${outputFileName}`;
+      fileLinks.push(fileUrl);
 
       // Add to processing queue
       imageProcessingQueue.add({
@@ -112,25 +114,17 @@ router.post("/upload", upload.array("files", 8), async (req, res) => {
         attempts: 3,
         removeOnComplete: true
       });
+    }
 
-      return {
-        originalName: file.originalname,
-        predictedUrl
-      };
-    });
-
-    // Return predicted URLs immediately
-    return res.status(202).json({
-      message: "Files accepted for processing",
-      predictedUrls: predictions.map(p => ({
-        fileName: p.originalName,
-        url: p.predictedUrl
-      }))
+    // Return same response format as original code
+    return res.status(200).json({
+      message: "Files uploaded successfully",
+      fileLinks,
     });
 
   } catch (error) {
-    console.error("Error handling upload:", error);
-    return res.status(500).json({ error: "Failed to process upload request" });
+    console.error("Error uploading files:", error);
+    return res.status(500).json({ error: "Failed to upload files" });
   }
 });
 
