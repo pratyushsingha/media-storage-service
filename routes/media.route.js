@@ -14,8 +14,4 @@ router.route("/:fileName").get((req, res) => {
     }
   });
 });
-
-router.route("/").get((req, res) => {
-  res.status(200).send("Media route");
-});
 export default router;
