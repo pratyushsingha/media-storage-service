@@ -53,7 +53,7 @@ async function compressImage(inputPath, outputPath, attempt = 1) {
 }
 
 router.post("/upload", upload.array("files", 2), async (req, res) => {
-  const albumPin = req.headers["x-album-pin"];
+  const albumPin = req.body.albumPin;
 
   if (!albumPin) {
     return res.status(400).json({ error: "Album pin is required" });
