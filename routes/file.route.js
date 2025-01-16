@@ -157,4 +157,24 @@ router.get("/download/:fileName", (req, res) => {
   }
 });
 
+router.post("/logo-cover-image", upload.single("image"), async (req, res) => {
+  const timestamp = Date.now();
+  const outputFileName = `${timestamp}.webp`;
+  const outputFilePath = path.join(mediaStoragePath, outputFileName);
+
+  try {
+    fs.unlinkSync(req.file.path);
+
+    const fileUrl = `${req.protocol}://${req.get(
+      "host"
+    )}/media/${outputFileName}`;
+    return res
+      .status(200)
+      .json({ message: "File uploaded successfully", fileUrl });
+  } catch (error) {
+    console.error("Error uploading file:", error);
+    return res.status(500).json({ error: "Failed to upload file" });
+  }
+});
+
 export default router;
