@@ -158,16 +158,18 @@ router.get("/download/:fileName", (req, res) => {
 });
 
 router.post("/logo-cover-image", upload.single("image"), async (req, res) => {
-  const timestamp = Date.now();
-  const outputFileName = `${timestamp}.webp`;
+  if (!req.file) {
+    return res.status(400).json({ error: "No file uploaded" });
+  }
+
+  const outputFileName = req.file.filename;
   const outputFilePath = path.join(mediaStoragePath, outputFileName);
 
   try {
-    fs.unlinkSync(req.file.path);
-
     const fileUrl = `${req.protocol}://${req.get(
       "host"
     )}/media/${outputFileName}`;
+
     return res
       .status(200)
       .json({ message: "File uploaded successfully", fileUrl });
@@ -177,4 +179,42 @@ router.post("/logo-cover-image", upload.single("image"), async (req, res) => {
   }
 });
 
+router
+  .route("/portfolio-images")
+  .post(upload.array("images", 50), async (req, res) => {
+    try {
+      const fileLinks = [];
+      const errors = [];
+
+      for (const file of req.files) {
+        const timestamp = Date.now();
+        const outputFileName = `${timestamp}.webp`;
+        const outputFilePath = path.join(mediaStoragePath, outputFileName);
+
+        const fileUrl = `${req.protocol}://${req.get(
+          "host"
+        )}/media/${outputFileName}`;
+        fileLinks.push(fileUrl);
+
+        imageProcessingQueue.add(
+          {
+            inputPath: file.path,
+            outputPath: outputFilePath,
+          },
+          {
+            attempts: 3,
+            removeOnComplete: true,
+          }
+        );
+      }
+
+      return res.status(200).json({
+        message: "Files uploaded successfully",
+        fileLinks,
+      });
+    } catch (error) {
+      console.error("Error uploading files:", error);
+      return res.status(500).json({ error: "Failed to upload files" });
+    }
+  });
 export default router;
