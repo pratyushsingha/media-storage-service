@@ -4,6 +4,8 @@ import path from "path";
 import sharp from "sharp";
 import { upload } from "../utils/multer.js";
 import Queue from "bull";
+import { rekognitionClient } from "../utils/rekognition.js";
+import { IndexFacesCommand } from "@aws-sdk/client-rekognition";
 
 const router = Router();
 const mediaStoragePath = path.join(process.cwd(), "media");
@@ -59,11 +61,26 @@ async function compressImage(inputPath, outputPath) {
 }
 
 imageProcessingQueue.process(async (job) => {
-  const { inputPath, outputPath } = job.data;
+  const { inputPath, outputPath, albumPin } = job.data;
   if (!fs.existsSync(inputPath)) {
     return { success: false, error: "Input file not found" };
   }
   try {
+    const params = {
+      Image: {
+        Bytes: fs.readFileSync(inputPath),
+      },
+      CollectionId: "global-album-collection",
+      ExternalImageId: albumPin,
+      MaxFaces: 5,
+      QualityFilter: "AUTO",
+      DetectionAttributes: ["ALL"],
+    };
+
+    const command = new IndexFacesCommand(params);
+    const response = await rekognitionClient.send(command);
+    console.log(`Indexed image: ${inputPath}`, response);
+
     const compressedPath = await compressImage(inputPath, outputPath);
     fs.unlinkSync(inputPath);
     return { success: true, path: compressedPath };
@@ -111,6 +128,7 @@ router.post("/upload", upload.array("files", 2), async (req, res) => {
         {
           inputPath: file.path,
           outputPath: outputFilePath,
+          albumPin,
         },
         {
           attempts: 3,
@@ -217,4 +235,55 @@ router
       return res.status(500).json({ error: "Failed to upload files" });
     }
   });
+
+router.route("/album/:albumPin").get(async (req, res) => {
+  const { albumPin } = req.params;
+  const { page = 1, limit = 10 } = req.query;
+
+  try {
+    if (!fs.existsSync(mediaStoragePath)) {
+      return res.status(404).json({ error: "Media folder not found" });
+    }
+
+    const files = fs.readdirSync(mediaStoragePath);
+    const images = files
+      .filter((file) => file.startsWith(albumPin))
+      .map((file) => ({
+        url: `${req.protocol}://${req.get("host")}/media/${file}`,
+      }));
+
+    if (images.length === 0) {
+      return res
+        .status(404)
+        .json({ message: "No images found for this album" });
+    }
+
+    const startIndex = (page - 1) * limit;
+    const endIndex = page * limit;
+    const paginatedImages = images.slice(startIndex, endIndex);
+
+    const totalImages = images.length;
+    const totalPages = Math.ceil(totalImages / limit);
+
+    return res.json({
+      status: 200,
+      data: {
+        images: paginatedImages,
+        pagination: {
+          currentPage: parseInt(page),
+          totalPages,
+          totalImages,
+        },
+      },
+      message: "Images retrieved successfully",
+    });
+  } catch (error) {
+    console.error("Error retrieving album images:", error);
+    return res.status(500).json({
+      error: "An error occurred while retrieving album images",
+      details: error.message,
+    });
+  }
+});
+
 export default router;
