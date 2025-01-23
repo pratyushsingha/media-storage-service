@@ -6,14 +6,15 @@ import { upload } from "../utils/multer.js";
 import Queue from "bull";
 import { rekognitionClient } from "../utils/rekognition.js";
 import { IndexFacesCommand } from "@aws-sdk/client-rekognition";
+import axios from "axios";
 
 const router = Router();
 const mediaStoragePath = path.join(process.cwd(), "media");
 
 const imageProcessingQueue = new Queue("image-processing", {
   redis: {
-    host: "localhost",
-    port: 6379,
+    host: process.env.REDIS_HOST || "localhost",
+    port: process.env.REDIS_PORT || 6379,
   },
 });
 
@@ -25,50 +26,68 @@ const MAX_FILE_SIZE = 600 * 1024;
 const MIN_FILE_SIZE = 500 * 1024;
 const MIN_QUALITY = 15;
 
+async function resizeImageForRekognition(inputPath) {
+  const imageBuffer = await sharp(inputPath)
+    .resize(1024, 1024, {
+      fit: "inside",
+      withoutEnlargement: true,
+    })
+    .jpeg({ quality: 80 })
+    .toBuffer();
+
+  if (imageBuffer.length > 15 * 1024 * 1024) {
+    throw new Error("Image is still too large after resizing.");
+  }
+
+  return imageBuffer;
+}
+
 async function compressImage(inputPath, outputPath) {
   let quality = 80;
   const qualityStep = 5;
   let lastSuccessfulFileSize = null;
   let bestOutputPath = null;
 
+  const tempOutputPath = `${outputPath}.tmp`;
+
   while (quality >= MIN_QUALITY) {
-    await sharp(inputPath).webp({ quality }).toFile(outputPath);
-    const fileSize = fs.statSync(outputPath).size;
+    await sharp(inputPath).jpeg({ quality }).toFile(tempOutputPath);
+    const fileSize = fs.statSync(tempOutputPath).size;
 
     if (fileSize >= MIN_FILE_SIZE && fileSize <= MAX_FILE_SIZE) {
-      console.log(
-        `Image compressed to ${fileSize} bytes with quality ${quality}`
-      );
+      fs.renameSync(tempOutputPath, outputPath);
       return outputPath;
     }
 
     if (!lastSuccessfulFileSize || fileSize < lastSuccessfulFileSize) {
       lastSuccessfulFileSize = fileSize;
-      bestOutputPath = outputPath;
+      bestOutputPath = tempOutputPath;
     }
 
     quality -= qualityStep;
   }
 
   if (bestOutputPath) {
-    console.log(
-      `Unable to compress image within 500-600 KB. Best size: ${lastSuccessfulFileSize} bytes.`
-    );
-    return bestOutputPath;
+    fs.renameSync(bestOutputPath, outputPath);
+    return outputPath;
   }
 
   throw new Error(`Failed to compress image.`);
 }
 
 imageProcessingQueue.process(async (job) => {
-  const { inputPath, outputPath, albumPin } = job.data;
+  const { inputPath, outputPath, albumPin, fileUrl, compressedFileUrl } = job.data;
+
   if (!fs.existsSync(inputPath)) {
     return { success: false, error: "Input file not found" };
   }
+
   try {
+    const resizedImageBuffer = await resizeImageForRekognition(inputPath);
+
     const params = {
       Image: {
-        Bytes: fs.readFileSync(inputPath),
+        Bytes: resizedImageBuffer,
       },
       CollectionId: "global-album-collection",
       ExternalImageId: albumPin,
@@ -79,11 +98,29 @@ imageProcessingQueue.process(async (job) => {
 
     const command = new IndexFacesCommand(params);
     const response = await rekognitionClient.send(command);
-    console.log(`Indexed image: ${inputPath}`, response);
 
     const compressedPath = await compressImage(inputPath, outputPath);
+
     fs.unlinkSync(inputPath);
-    return { success: true, path: compressedPath };
+    fs.renameSync(compressedPath, inputPath);
+
+    const faceRecords = response.FaceRecords || [];
+    for (const faceRecord of faceRecords) {
+      try {
+        await axios.post(
+          `${process.env.MAIN_BACKEND_URL}/album/face-metadata`,
+          {
+            key: compressedFileUrl,
+            faceId: faceRecord.Face.FaceId,
+            imageId: faceRecord.Face.ImageId,
+          }
+        );
+      } catch (error) {
+        console.error(`Error saving face metadata: ${error.message}`);
+      }
+    }
+
+    return { success: true, path: inputPath };
   } catch (error) {
     if (fs.existsSync(outputPath)) {
       fs.unlinkSync(outputPath);
@@ -116,25 +153,29 @@ router.post("/upload", upload.array("files", 2), async (req, res) => {
 
     for (const file of req.files) {
       const timestamp = Date.now();
-      const outputFileName = `${albumPin}_${timestamp}.webp`;
-      const outputFilePath = path.join(mediaStoragePath, outputFileName);
+      const tempFileName = `temp_${albumPin}_${timestamp}.jpg`;
+      const compressedFileName = `${albumPin}_${timestamp}.jpg`;
 
-      const fileUrl = `${req.protocol}://${req.get(
-        "host"
-      )}/media/${outputFileName}`;
-      fileLinks.push(fileUrl);
+      const tempFilePath = path.join(mediaStoragePath, tempFileName);
+      const compressedFilePath = path.join(mediaStoragePath, compressedFileName);
 
-      imageProcessingQueue.add(
-        {
-          inputPath: file.path,
-          outputPath: outputFilePath,
-          albumPin,
-        },
-        {
-          attempts: 3,
-          removeOnComplete: true,
-        }
-      );
+      const tempFileUrl = `${req.protocol}://${req.get("host")}/media/${tempFileName}`;
+      const compressedFileUrl = `${req.protocol}://${req.get("host")}/media/temp_${compressedFileName}`;
+
+      fs.renameSync(file.path, tempFilePath);
+
+      imageProcessingQueue.add({
+        inputPath: tempFilePath,
+        outputPath: compressedFilePath,
+        albumPin,
+        fileUrl: tempFileUrl,
+        compressedFileUrl,
+      });
+
+      fileLinks.push({
+        tempUrl: tempFileUrl,
+        compressedUrl: compressedFileUrl,
+      });
     }
 
     return res.status(200).json({
@@ -169,121 +210,121 @@ router.get("/download/:fileName", (req, res) => {
   const imagePath = path.join(mediaStoragePath, fileName);
 
   if (fs.existsSync(imagePath)) {
-    res.download(imagePath);
+    const fileExtension = path.extname(fileName).toLowerCase();
+    let contentType = "application/octet-stream";
+    switch (fileExtension) {
+      case ".jpg":
+      case ".jpeg":
+        contentType = "image/jpeg";
+        break;
+      case ".png":
+        contentType = "image/png";
+        break;
+      case ".gif":
+        contentType = "image/gif";
+        break;
+      case ".pdf":
+        contentType = "application/pdf";
+        break;
+      default:
+        contentType = "application/octet-stream";
+    }
+
+    res.setHeader("Content-Type", contentType);
+
+    res.download(imagePath, fileName, (err) => {
+      if (err) {
+        console.error("Error downloading file:", err);
+        res.status(500).json({ error: "Failed to download file." });
+      }
+    });
   } else {
     res.status(404).json({ error: "Image not found." });
   }
 });
 
-router.post("/logo-cover-image", upload.single("image"), async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: "No file uploaded" });
-  }
-
-  const outputFileName = req.file.filename;
-  const outputFilePath = path.join(mediaStoragePath, outputFileName);
-
-  try {
-    const fileUrl = `${req.protocol}://${req.get(
-      "host"
-    )}/media/${outputFileName}`;
-
-    return res
-      .status(200)
-      .json({ message: "File uploaded successfully", fileUrl });
-  } catch (error) {
-    console.error("Error uploading file:", error);
-    return res.status(500).json({ error: "Failed to upload file" });
-  }
-});
-
-router
-  .route("/portfolio-images")
-  .post(upload.array("images", 50), async (req, res) => {
-    try {
-      const fileLinks = [];
-      const errors = [];
-
-      for (const file of req.files) {
-        const timestamp = Date.now();
-        const outputFileName = `${timestamp}.webp`;
-        const outputFilePath = path.join(mediaStoragePath, outputFileName);
-
-        const fileUrl = `${req.protocol}://${req.get(
-          "host"
-        )}/media/${outputFileName}`;
-        fileLinks.push(fileUrl);
-
-        imageProcessingQueue.add(
-          {
-            inputPath: file.path,
-            outputPath: outputFilePath,
-          },
-          {
-            attempts: 3,
-            removeOnComplete: true,
-          }
-        );
-      }
-
-      return res.status(200).json({
-        message: "Files uploaded successfully",
-        fileLinks,
-      });
-    } catch (error) {
-      console.error("Error uploading files:", error);
-      return res.status(500).json({ error: "Failed to upload files" });
-    }
-  });
-
-router.route("/album/:albumPin").get(async (req, res) => {
+router.get("/album-status/:albumPin", async (req, res) => {
   const { albumPin } = req.params;
-  const { page = 1, limit = 10 } = req.query;
 
   try {
-    if (!fs.existsSync(mediaStoragePath)) {
-      return res.status(404).json({ error: "Media folder not found" });
+    const jobs = await imageProcessingQueue.getJobs([
+      "active",
+      "completed",
+      "failed",
+      "waiting",
+    ]);
+
+    const albumJobs = jobs.filter((job) => job.data.albumPin === albumPin);
+
+    const processedJobs = albumJobs.filter((job) => job.finishedOn);
+    const failedJobs = albumJobs.filter((job) => job.failedReason);
+    const remainingJobs = albumJobs.filter(
+      (job) => !job.finishedOn && !job.failedReason
+    );
+
+    const processedImages = processedJobs.map((job) => ({
+      id: job.id,
+      inputPath: job.data.inputPath,
+      outputPath: job.data.outputPath,
+      fileUrl: job.data.fileUrl,
+      compressedUrl: job.data.compressedUrl,
+      status: "processed",
+    }));
+
+    const failedImages = failedJobs.map((job) => ({
+      id: job.id,
+      inputPath: job.data.inputPath,
+      outputPath: job.data.outputPath,
+      fileUrl: job.data.fileUrl,
+      compressedUrl: job.data.compressedUrl,
+      status: "failed",
+      error: job.failedReason,
+    }));
+
+    const remainingImages = remainingJobs.map((job) => ({
+      id: job.id,
+      inputPath: job.data.inputPath,
+      outputPath: job.data.outputPath,
+      fileUrl: job.data.fileUrl,
+      compressedUrl: job.data.compressedUrl,
+      status: "remaining",
+    }));
+
+    const totalFiles = albumJobs.length;
+    const processedFiles = processedJobs.length;
+    const failedFiles = failedJobs.length;
+    const remainingFiles = remainingJobs.length;
+
+    let overallStatus;
+    if (failedFiles === 0 && remainingFiles === 0) {
+      overallStatus = "success";
+    } else if (processedFiles > 0 && (failedFiles > 0 || remainingFiles > 0)) {
+      overallStatus = "partial_success";
+    } else if (failedFiles === totalFiles) {
+      overallStatus = "failed";
+    } else {
+      overallStatus = "in_progress";
     }
 
-    const files = fs.readdirSync(mediaStoragePath);
-    const images = files
-      .filter((file) => file.startsWith(albumPin))
-      .map((file) => ({
-        url: `${req.protocol}://${req.get("host")}/media/${file}`,
-      }));
-
-    if (images.length === 0) {
-      return res
-        .status(404)
-        .json({ message: "No images found for this album" });
-    }
-
-    const startIndex = (page - 1) * limit;
-    const endIndex = page * limit;
-    const paginatedImages = images.slice(startIndex, endIndex);
-
-    const totalImages = images.length;
-    const totalPages = Math.ceil(totalImages / limit);
-
-    return res.json({
-      status: 200,
+    return res.status(200).json({
+      success: true,
       data: {
-        images: paginatedImages,
-        pagination: {
-          currentPage: parseInt(page),
-          totalPages,
-          totalImages,
-        },
+        totalFiles,
+        processedFiles,
+        failedFiles,
+        remainingFiles,
+        overallStatus,
+        processed: processedImages,
+        failed: failedImages,
+        remaining: remainingImages,
       },
-      message: "Images retrieved successfully",
     });
   } catch (error) {
-    console.error("Error retrieving album images:", error);
+    console.error("Error fetching album status:", error);
     return res.status(500).json({
-      error: "An error occurred while retrieving album images",
-      details: error.message,
+      success: false,
+      error: "Failed to fetch album status",
     });
   }
 });
-
 export default router;

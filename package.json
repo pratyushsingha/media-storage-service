@@ -12,6 +12,7 @@
   "description": "",
   "dependencies": {
     "@aws-sdk/client-rekognition": "^3.726.1",
+    "axios": "^1.7.9",
     "bull": "^3.29.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
