@@ -163,8 +163,8 @@ router.post("/upload", upload.array("files", 2), async (req, res) => {
         compressedFileName
       );
 
-      const tempFileUrl = `${process.env.BASE_URL}/media/${tempFileName}`;
-      const compressedFileUrl = `${process.env.BASE_URL}/media/temp_${compressedFileName}`;
+      const tempFileUrl = `https://media.shaadialbum.in/media/${tempFileName}`;
+      const compressedFileUrl = `https://media.shaadialbum.in/media/temp_${compressedFileName}`;
 
       fs.renameSync(file.path, tempFilePath);
 
