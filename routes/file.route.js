@@ -331,4 +331,40 @@ router.get("/album-status/:albumPin", async (req, res) => {
     });
   }
 });
+
+router.post("/cancel-jobs/:albumPin", async (req, res) => {
+  const { albumPin } = req.params;
+
+  try {
+    await imageProcessingQueue.pause();
+
+    const jobs = await imageProcessingQueue.getJobs([
+      "active",
+      "waiting",
+      "delayed",
+      "paused",
+    ]);
+
+    const albumJobs = jobs.filter((job) => job.data.albumPin === albumPin);
+
+    for (const job of albumJobs) {
+      await job.remove();
+    }
+
+    await imageProcessingQueue.resume();
+
+    return res.status(200).json({
+      success: true,
+      message: `Cancelled all jobs for albumPin: ${albumPin}`,
+      cancelledJobsCount: albumJobs.length,
+    });
+  } catch (error) {
+    console.error("Error cancelling jobs:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to cancel jobs",
+    });
+  }
+});
+
 export default router;
