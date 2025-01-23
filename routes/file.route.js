@@ -76,7 +76,8 @@ async function compressImage(inputPath, outputPath) {
 }
 
 imageProcessingQueue.process(async (job) => {
-  const { inputPath, outputPath, albumPin, fileUrl, compressedFileUrl } = job.data;
+  const { inputPath, outputPath, albumPin, fileUrl, compressedFileUrl } =
+    job.data;
 
   if (!fs.existsSync(inputPath)) {
     return { success: false, error: "Input file not found" };
@@ -157,10 +158,13 @@ router.post("/upload", upload.array("files", 2), async (req, res) => {
       const compressedFileName = `${albumPin}_${timestamp}.jpg`;
 
       const tempFilePath = path.join(mediaStoragePath, tempFileName);
-      const compressedFilePath = path.join(mediaStoragePath, compressedFileName);
+      const compressedFilePath = path.join(
+        mediaStoragePath,
+        compressedFileName
+      );
 
-      const tempFileUrl = `${req.protocol}://${req.get("host")}/media/${tempFileName}`;
-      const compressedFileUrl = `${req.protocol}://${req.get("host")}/media/temp_${compressedFileName}`;
+      const tempFileUrl = `${process.env.BASE_URL}/media/${tempFileName}`;
+      const compressedFileUrl = `${process.env.BASE_URL}/media/temp_${compressedFileName}`;
 
       fs.renameSync(file.path, tempFilePath);
 
